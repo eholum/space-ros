@@ -20,7 +20,7 @@ jobs:
       - name: Build Space ROS
         id: build
         run: |
-          earthly --ci --output +sources
+          earthly --ci --output +sources --CACHE_ARTIFACTS="$(date +%s)"
           earthly --ci --output +build-testing
           echo "archivename=$(basename log/build_results_archives/build_results_*.tar.bz2)" >> $GITHUB_ENV
       - name: Upload build results archive

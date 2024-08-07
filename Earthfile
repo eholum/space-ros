@@ -132,6 +132,10 @@ spaceros-artifacts:
   USER ${USERNAME}
   WORKDIR ${SPACEROS_DIR}
 
+  # Passing a different value for this argument in the build ensures this step is not cached in CI
+  # or by the build script.
+  ARG CACHE_ARTIFACTS=1
+
   COPY ros2.repos ./
   COPY excluded-pkgs.txt ./
 

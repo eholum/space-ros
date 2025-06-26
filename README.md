@@ -22,5 +22,4 @@ earthly +dev-image
 
 ## Contribution rules
 
-See the [contributing guide](https://github.com/space-ros/.github/blob/master/CONTRIBUTING.md) for details on how to contribute
-to the Space ROS project.
+See the [contributing guide](https://github.com/space-ros/.github/blob/master/CONTRIBUTING.md) for details on how to contribute to the Space ROS project.

@@ -17,8 +17,7 @@ ARG --global IMAGE_NAME="osrf/space-ros"
 ARG --global IMAGE_TAG="latest"
 ARG --global USERNAME="spaceros-user"
 ARG --global HOME="/home/${USERNAME}"
-ARG --global WORKSPACE_DIR="/workspace"
-ARG --global SKIP_BUILD_TEST=true
+ARG --global WORKSPACE_DIR="/home/${USERNAME}/spaceros_ws"
 
 ###############################################################################
 ### Target Configurations
@@ -31,11 +30,14 @@ all:
   BUILD +main-image
   BUILD +dev-image
 
+# The main-image is a bare bones installation of the Space ROS packages.
 main-image:
-  BUILD +image --IMAGE_VARIANT=${IMAGE_TAG}
+  BUILD +image --IMAGE_VARIANT=${IMAGE_TAG} --SPACEROS_DIR="/opt/ros/spaceros"
 
+# The dev-image persists the entire Space ROS workspace, as well as additional
+# dev tooling and packages for working with Space ROS packages.
 dev-image:
-  BUILD +image --IMAGE_VARIANT=dev
+  BUILD +image --IMAGE_VARIANT=dev --SPACEROS_DIR="${WORKSPACE_DIR}/install"
 
 ###############################################################################
 ### PreInstallation Stage
@@ -43,19 +45,18 @@ dev-image:
 # dependencies required for the subsequent stages.
 ###############################################################################
 pre-installation:
+  ARG --required SPACEROS_DIR
   FROM ubuntu:noble
 
   ENV DEBIAN_FRONTEND=noninteractive
   ENV ROS_DISTRO="jazzy"
-  ENV SPACEROS_DIR="/opt/ros/spaceros"
   ENV HOME=${HOME}
+  ENV SPACEROS_DIR=${SPACEROS_DIR}
+  RUN mkdir -p ${WORKSPACE_DIR}
   WORKDIR ${WORKSPACE_DIR}
 
   # Set the locale
-  RUN --mount=type=cache,mode=0777,target=/var/cache/apt,sharing=locked,id=cache_apt_cache \
-      --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
-      apt-get update && \
-      apt-get install -y locales
+  RUN apt-get update && apt-get install -y locales
   RUN locale-gen en_US en_US.UTF-8
   RUN update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
   ENV LANG=en_US.UTF-8
@@ -65,9 +66,7 @@ pre-installation:
   # The main variation is getting Space ROS sources instead of the Rolling sources.
 
   # Add the ROS 2 apt repository
-  RUN --mount=type=cache,mode=0777,target=/var/cache/apt,sharing=locked,id=cache_apt_cache \
-      --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
-      apt-get install -y \
+  RUN apt-get update && apt-get install -y \
         curl \
         git \
         cmake \
@@ -114,11 +113,10 @@ setup:
 # test and development.
 ###############################################################################
 ikos-install:
-  FROM +pre-installation
+  ARG --required SPACEROS_DIR
+  FROM +pre-installation --SPACEROS_DIR=${SPACEROS_DIR}
 
-  RUN --mount=type=cache,mode=0777,target=/var/cache/apt,sharing=locked,id=cache_apt_cache \
-      --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
-      apt-get update && apt-get install --yes \
+  RUN apt-get update && apt-get install --yes \
       gcc \
       g++ \
       cmake \
@@ -161,28 +159,29 @@ ikos-install:
 ADD_IKOS:
   FUNCTION
     RUN --mount=type=cache,mode=0777,target=/var/cache/apt,sharing=locked,id=cache_apt_cache \
-      --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
-      apt-get install --yes gcc \
-      g++ \
-      cmake \
-      file \
-      libgmp-dev \
-      libboost-dev \
-      libboost-filesystem-dev \
-      libboost-thread-dev \
-      libboost-test-dev \
-      libsqlite3-dev \
-      libtbb-dev \
-      libz-dev \
-      libedit-dev \
-      python3 \
-      python3-pip \
-      python3-venv \
-      llvm-14 \
-      llvm-14-dev \
-      llvm-14-tools \
-      clang-14 \
-      ros-dev-tools
+        --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
+        apt-get update && apt-get install -y \
+          gcc \
+          g++ \
+          cmake \
+          file \
+          libgmp-dev \
+          libboost-dev \
+          libboost-filesystem-dev \
+          libboost-thread-dev \
+          libboost-test-dev \
+          libsqlite3-dev \
+          libtbb-dev \
+          libz-dev \
+          libedit-dev \
+          python3 \
+          python3-pip \
+          python3-venv \
+          llvm-14 \
+          llvm-14-dev \
+          llvm-14-tools \
+          clang-14 \
+          ros-dev-tools
 
     COPY +ikos-install/ikos /opt/ikos
     ENV PATH="/opt/ikos/bin/:$PATH"
@@ -195,10 +194,10 @@ ADD_IKOS:
 sources:
   FROM +setup
 
-  RUN apt install -y python3-vcstool \
-    && mkdir src -p \
-    && vcs import --retry 3 src < output.repos \
-    && vcs export --exact src > exact.repos
+  RUN apt-get update && apt-get install -y python3-vcstool
+  RUN mkdir src -p \
+      && vcs import --retry 3 src < output.repos \
+      && vcs export --exact src > exact.repos
 
   # Save artifacts to be used
   SAVE ARTIFACT exact.repos
@@ -213,23 +212,25 @@ rosdep:
   FROM +pre-installation
 
   # Rosdep updates
-  RUN apt-get install -y python3-rosdep \
-    && rosdep init \
-    && rosdep update
+  RUN apt-get update && apt-get install -y python3-rosdep \
+      && rosdep init \
+      && rosdep update
 
   # Copy Repos file
   COPY +sources/src ./src
   COPY excluded-pkgs.txt excluded-deps.txt ./
 
   # Install system package dependencies using rosdep
-  RUN rosdep install -y \
-        --from-paths src --ignore-src \
-        --simulate \
-        --rosdistro ${ROS_DISTRO} \
-        # `urdfdom_headers` is cloned from source, however rosdep can't find it.
-        # It is because package.xml manifest is missing. See: https://github.com/ros/urdfdom_headers
-        # Additionally, IKOS must be excluded as per: https://github.com/space-ros/docker/issues/99
-        --skip-keys "$(tr '\n' ' ' < 'excluded-pkgs.txt') urdfdom_headers ikos" > rosdeps.txt
+  RUN --mount=type=cache,mode=0777,target=/var/cache/apt,sharing=locked,id=cache_apt_cache \
+      --mount=type=cache,mode=0777,target=/var/lib/apt,sharing=locked,id=lib_apt_cache \
+      rosdep install -y \
+          --from-paths src --ignore-src \
+          --simulate \
+          --rosdistro ${ROS_DISTRO} \
+          # `urdfdom_headers` is cloned from source, however rosdep can't find it.
+          # It is because package.xml manifest is missing. See: https://github.com/ros/urdfdom_headers
+          # Additionally, IKOS must be excluded as per: https://github.com/space-ros/docker/issues/99
+          --skip-keys "$(tr '\n' ' ' < 'excluded-pkgs.txt') urdfdom_headers ikos" > rosdeps.txt
 
   # Process rosdeps.txt to a shell script
   RUN touch rosdeps.sh \
@@ -245,33 +246,34 @@ rosdep:
 
 ###############################################################################
 ### Build Stage
-# This stage is responsible for building the ROS 2 workspace.
+# This stage is responsible for building the ROS 2 workspace for either the dev
+# or the main image.
 ###############################################################################
 build:
   ARG --required IMAGE_VARIANT
   FROM +rosdep
 
   # Uncrustify Vendor has vcstool as a dependency
-  RUN apt install -y python3-vcstool
+  RUN apt-get update && apt-get install -y \
+        python3-vcstool \
+        python3-colcon-common-extensions
   RUN bash rosdeps.sh
   RUN mkdir -p ${SPACEROS_DIR}
-  RUN apt install -y python3-colcon-common-extensions
 
   DO +BUILD_WORKSPACE --IMAGE_VARIANT=${IMAGE_VARIANT}
 
-  SAVE ARTIFACT ${SPACEROS_DIR}
+  SAVE ARTIFACT ${SPACEROS_DIR} spaceros_install
+  SAVE ARTIFACT ${WORKSPACE_DIR} workspace
 
 BUILD_WORKSPACE:
   FUNCTION
   ARG --required IMAGE_VARIANT
 
-  # If Dev, add linters and build with debug info and tests
+  # If Dev, we do not use a merge install for the sake of testing and development
   IF [ "${IMAGE_VARIANT}" = "dev" ]
     COPY colcon_ws_config colcon_ws_config
     RUN python3 colcon_ws_config/prepare_workspace.py # outputs spaceros-linters.meta
     RUN colcon build \
-        --install-base ${SPACEROS_DIR} \
-        --merge-install \
         --metas ./spaceros-linters.meta \
         --cmake-args \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -295,43 +297,42 @@ BUILD_WORKSPACE:
 # This stage is responsible for running the tests on the ROS 2 workspace.
 ###############################################################################
 build-test:
-  FROM +build --IMAGE_VARIANT=dev
+  FROM +build --IMAGE_VARIANT=dev --SPACEROS_DIR="${WORKSPACE_DIR}/install"
 
   # Install dependencies for testing
-  RUN apt install -y python3-flake8 \
-      python3-pydocstyle \
-      clang-tidy \
-      graphviz \
-      uncrustify \
-      python3-pycodestyle \
-      cppcheck \
-      python3-nose \
-      google-mock \
-      pydocstyle \
-      python3-pytest \
-      python3-pytest-timeout \
-      python3-pytest-mock \
-      python3-pytest-cov \
-      python3-matplotlib \
-      pyflakes3 \
-      python3-mypy \
-      python3-argcomplete
+  RUN apt-get update && apt-get install -y \
+        python3-flake8 \
+        python3-pydocstyle \
+        clang-tidy \
+        graphviz \
+        uncrustify \
+        python3-pycodestyle \
+        cppcheck \
+        python3-nose \
+        google-mock \
+        pydocstyle \
+        python3-pytest \
+        python3-pytest-timeout \
+        python3-pytest-mock \
+        python3-pytest-cov \
+        python3-matplotlib \
+        pyflakes3 \
+        python3-mypy \
+        python3-argcomplete
   RUN pip3 install pytest-rerunfailures \
-      pytest-cov \
-      pytest-repeat \
-      mypy \
-      argcomplete --break-system-packages
+        pytest-cov \
+        pytest-repeat \
+        mypy \
+        argcomplete --break-system-packages
 
   RUN . ${SPACEROS_DIR}/setup.sh && \
       colcon test \
-        --merge-install \
         --retest-until-pass 2 \
         --packages-skip ament_lint \
         --ctest-args -LE "(ikos|xfail)" \
         --ctest-args "--output-on-failure" \
         --pytest-args -m "not xfail" \
-        --pytest-args "--disable-warnings" \
-        --install-base ${SPACEROS_DIR}
+        --pytest-args "--disable-warnings"
 
   # Create tar ball of the logs directory
   RUN tar -cjf build_test_results.tar.bz2 log
@@ -344,21 +345,22 @@ build-test:
 # workspace. The image is saved only if the build-test stage is successful.
 ###############################################################################
 prepare-image:
-  FROM +pre-installation
+  ARG --required SPACEROS_DIR
+  FROM +pre-installation --SPACEROS_DIR=${SPACEROS_DIR}
 
   # Add missing dependencies
-  RUN apt update \
-    && apt install -y libspdlog-dev \
-      python3-numpy \
-      tzdata \
-      sudo \
-      ros-dev-tools
+  RUN apt-get update && apt-get install -y \
+        libspdlog-dev \
+        python3-numpy \
+        tzdata \
+        sudo \
+        ros-dev-tools
   RUN pip3 install pyyaml \
-      lark \
-      packaging \
-      netifaces \
-      catkin_pkg \
-      psutil --break-system-packages
+        lark \
+        packaging \
+        netifaces \
+        catkin_pkg \
+        psutil --break-system-packages
 
   # Prepare the image
   RUN mkdir -p ${SPACEROS_DIR}
@@ -372,29 +374,23 @@ prepare-image:
 ###############################################################################
 image:
   ARG --required IMAGE_VARIANT
-  FROM +prepare-image
+  ARG --required SPACEROS_DIR
+  FROM +prepare-image --SPACEROS_DIR=${SPACEROS_DIR}
 
-  COPY +build/spaceros ${SPACEROS_DIR}
+  # Post Installation
+  DO +POST_INSTALLATION --IMAGE_VARIANT=${IMAGE_VARIANT} --SPACEROS_DIR=${SPACEROS_DIR}
+
   COPY +sources/exact.repos ${SPACEROS_DIR}/scripts/spaceros.repos
   COPY scripts/generate-repos.sh scripts/merge-repos.py ${SPACEROS_DIR}/scripts/
   RUN chmod +x ${SPACEROS_DIR}/scripts/generate-repos.sh ${SPACEROS_DIR}/scripts/merge-repos.py \
     && mv ${SPACEROS_DIR}/rosdeps.sh ${SPACEROS_DIR}/scripts/rosdeps.sh
 
-  # Post Installation
-  DO +POST_INSTALLATION --IMAGE_VARIANT=${IMAGE_VARIANT}
-
-  # Clear Apt and Pip cache
-  RUN rm -rf /var/lib/apt/lists/* /tmp/pip-reqs /var/cache/apt/archives \
-    && apt-get clean \
-    && pip cache purge
-
   # Add user and group
   RUN useradd -m -s /bin/bash ${USERNAME} \
-    && chown -R ${USERNAME}:${USERNAME} ${SPACEROS_DIR}/scripts \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 
   # Ensure the user has access to the home and install directories
-  RUN chown -R ${USERNAME}:${USERNAME} ${HOME} ${SPACEROS_DIR}
+  RUN chown -R ${USERNAME}:${USERNAME} ${HOME}
 
   # Add the entrypoint
   COPY ./docker/entrypoint.sh /entrypoint.sh
@@ -404,13 +400,7 @@ image:
   USER ${USERNAME}
   WORKDIR ${HOME}
 
-  # Only save image if build-test is successful
-  IF [ "${SKIP_BUILD_TEST}" = "true" ]
-    SAVE IMAGE ${IMAGE_NAME}:${IMAGE_VARIANT}
-  ELSE
-    BUILD +build-test
-    SAVE IMAGE ${IMAGE_NAME}:${IMAGE_VARIANT}
-  END
+  SAVE IMAGE ${IMAGE_NAME}:${IMAGE_VARIANT}
 
 ###############################################################################
 ### Post Installation Stage
@@ -420,19 +410,27 @@ image:
 POST_INSTALLATION:
   FUNCTION
   ARG --required IMAGE_VARIANT
+  ARG --required SPACEROS_DIR
 
   # If Dev, preserve the source and install IKOS and excluded dependencies
   IF [ "${IMAGE_VARIANT}" = "dev" ]
-    DO +ADD_IKOS
+    DO +ADD_IKOS --SPACEROS_DIR=${SPACEROS_DIR}
 
-    COPY --chown=${USERNAME}:${USERNAME} +sources/src ${HOME}/spaceros_ws/src
+    COPY +build/workspace ${WORKSPACE_DIR}
     COPY excluded-deps.txt ./
-    RUN apt install -y $(grep -v '^#' excluded-deps.txt) \
-      && rm -rf excluded-deps.txt
-  # If Core, clean up with workspace directory
+    RUN apt-get update && apt-get install -y \
+          $(grep -v '^#' excluded-deps.txt) \
+          && rm -rf excluded-deps.txt
+  # If Core, we only care about the install, and then clear the workspace
   ELSE
+    COPY +build/spaceros_install ${SPACEROS_DIR}
     RUN rm -rf ${WORKSPACE_DIR}
   END
+
+  # Clear Apt and Pip cache
+  RUN rm -rf /var/lib/apt/lists/* /tmp/pip-reqs /var/cache/apt/archives \
+    && apt-get clean \
+    && pip cache purge
 
 ###############################################################################
 ### Push Image Stage for main image
